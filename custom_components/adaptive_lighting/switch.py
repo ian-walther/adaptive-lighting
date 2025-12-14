@@ -122,6 +122,7 @@ from .const import (
     CONF_SLEEP_RGB_COLOR,
     CONF_SLEEP_RGB_OR_COLOR_TEMP,
     CONF_SLEEP_TRANSITION,
+    CONF_OVERRIDE_TRANSITION,
     CONF_SUNRISE_OFFSET,
     CONF_SUNRISE_TIME,
     CONF_SUNSET_OFFSET,
@@ -135,7 +136,11 @@ from .const import (
     ICON_BRIGHTNESS,
     ICON_COLOR_TEMP,
     ICON_MAIN,
+    ICON_OVERRIDE,
     ICON_SLEEP,
+    OVERRIDE_BRIGHTNESS_NUMBER,
+    OVERRIDE_COLOR_TEMP_NUMBER,
+    OVERRIDE_MODE_SWITCH,
     SERVICE_APPLY,
     SERVICE_CHANGE_SWITCH_SETTINGS,
     SERVICE_SET_MANUAL_CONTROL,
@@ -161,6 +166,8 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
     from homeassistant.helpers.typing import NoEventData, VolDictType
+
+    from .number import SimpleNumber
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -431,6 +438,17 @@ async def async_setup_entry(  # noqa: PLR0915
         config_entry=config_entry,
         icon=ICON_BRIGHTNESS,
     )
+    override_mode_switch = SimpleSwitch(
+        which="Override Mode",
+        initial_state=False,
+        hass=hass,
+        config_entry=config_entry,
+        icon=ICON_OVERRIDE,
+    )
+    # Number entities are created by the number platform - retrieve them from hass.data
+    override_brightness_number = data[config_entry.entry_id][OVERRIDE_BRIGHTNESS_NUMBER]
+    override_color_temp_number = data[config_entry.entry_id][OVERRIDE_COLOR_TEMP_NUMBER]
+
     switch = AdaptiveSwitch(
         hass,
         config_entry,
@@ -438,15 +456,26 @@ async def async_setup_entry(  # noqa: PLR0915
         sleep_mode_switch,
         adapt_color_switch,
         adapt_brightness_switch,
+        override_mode_switch,
+        override_brightness_number,
+        override_color_temp_number,
     )
 
     data[config_entry.entry_id][SLEEP_MODE_SWITCH] = sleep_mode_switch
     data[config_entry.entry_id][ADAPT_COLOR_SWITCH] = adapt_color_switch
     data[config_entry.entry_id][ADAPT_BRIGHTNESS_SWITCH] = adapt_brightness_switch
+    data[config_entry.entry_id][OVERRIDE_MODE_SWITCH] = override_mode_switch
+    # Note: OVERRIDE_BRIGHTNESS_NUMBER and OVERRIDE_COLOR_TEMP_NUMBER are stored by number.py
     data[config_entry.entry_id][SWITCH_DOMAIN] = switch
 
     async_add_entities(
-        [sleep_mode_switch, adapt_color_switch, adapt_brightness_switch, switch],
+        [
+            sleep_mode_switch,
+            adapt_color_switch,
+            adapt_brightness_switch,
+            override_mode_switch,
+            switch,
+        ],
         update_before_add=True,
     )
 
@@ -847,6 +876,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         sleep_mode_switch: SimpleSwitch,
         adapt_color_switch: SimpleSwitch,
         adapt_brightness_switch: SimpleSwitch,
+        override_mode_switch: SimpleSwitch,
+        override_brightness_number: SimpleNumber,
+        override_color_temp_number: SimpleNumber,
     ) -> None:
         """Initialize the Adaptive Lighting switch."""
         # Set attributes that can't be modified during runtime
@@ -856,6 +888,9 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         self.sleep_mode_switch = sleep_mode_switch
         self.adapt_color_switch = adapt_color_switch
         self.adapt_brightness_switch = adapt_brightness_switch
+        self.override_mode_switch = override_mode_switch
+        self.override_brightness_number = override_brightness_number
+        self.override_color_temp_number = override_color_temp_number
 
         data = validate(config_entry)
 
@@ -920,6 +955,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
 
         self.initial_transition = data[CONF_INITIAL_TRANSITION]
         self._sleep_transition = data[CONF_SLEEP_TRANSITION]
+        self._override_transition = data[CONF_OVERRIDE_TRANSITION]
         self._only_once = data[CONF_ONLY_ONCE]
         self._prefer_rgb_color = data[CONF_PREFER_RGB_COLOR]
         self._separate_turn_on_commands = data[CONF_SEPARATE_TURN_ON_COMMANDS]
@@ -1049,6 +1085,22 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             _LOGGER.debug("%s: Cancelled '_setup_listeners'", self._name)
             return
 
+        # Wait for number entities to be initialized
+        # SimpleSwitch entities now set _state in __init__, so no waiting needed
+        # but SimpleNumber entities still set _value in async_added_to_hass
+        while not all(
+            num._value is not None
+            for num in [
+                self.override_brightness_number,
+                self.override_color_temp_number,
+            ]
+        ):
+            _LOGGER.debug(
+                "%s: Waiting for number entities to be initialized",
+                self._name,
+            )
+            await asyncio.sleep(0.1)
+
         assert not self.remove_listeners
 
         self._update_time_interval_listener()
@@ -1058,8 +1110,31 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             entity_ids=self.sleep_mode_switch.entity_id,
             action=self._sleep_mode_switch_state_event_action,
         )
-
         self.remove_listeners.append(remove_sleep)
+
+        # Add listener for override mode switch
+        remove_override = async_track_state_change_event(
+            self.hass,
+            entity_ids=self.override_mode_switch.entity_id,
+            action=self._override_mode_switch_state_event_action,
+        )
+        self.remove_listeners.append(remove_override)
+
+        # Add listeners for override brightness and color temperature numbers
+        remove_override_brightness = async_track_state_change_event(
+            self.hass,
+            entity_ids=self.override_brightness_number.entity_id,
+            action=self._override_value_state_event_action,
+        )
+        self.remove_listeners.append(remove_override_brightness)
+
+        remove_override_color_temp = async_track_state_change_event(
+            self.hass,
+            entity_ids=self.override_color_temp_number.entity_id,
+            action=self._override_value_state_event_action,
+        )
+        self.remove_listeners.append(remove_override_color_temp)
+
         self._expand_light_groups()
 
     def _update_time_interval_listener(self) -> None:
@@ -1221,11 +1296,32 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             )
             return None
 
-        # The switch might be off and not have _settings set.
-        self._settings = self._sun_light_settings.get_settings(
-            self.sleep_mode_switch.is_on,
-            transition,
-        )
+        # Check if override mode is active (takes precedence over sleep mode)
+        is_override = self.override_mode_switch.is_on
+
+        if is_override:
+            # Use override values directly from number entities
+            override_brightness_pct = self.override_brightness_number.native_value
+            override_color_temp = self.override_color_temp_number.native_value
+            rgb_color = color_temperature_to_rgb(int(override_color_temp))
+            self._settings = {
+                "brightness_pct": override_brightness_pct,
+                "color_temp_kelvin": int(override_color_temp),
+                "rgb_color": rgb_color,
+                "force_rgb_color": False,
+            }
+            _LOGGER.debug(
+                "%s: Override mode active, using brightness=%s%%, color_temp=%sK",
+                self._name,
+                override_brightness_pct,
+                override_color_temp,
+            )
+        else:
+            # The switch might be off and not have _settings set.
+            self._settings = self._sun_light_settings.get_settings(
+                self.sleep_mode_switch.is_on,
+                transition,
+            )
 
         # Build service data.
         service_data: dict[str, Any] = {ATTR_ENTITY_ID: light}
@@ -1240,8 +1336,10 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             brightness = round(255 * self._settings["brightness_pct"] / 100)
             service_data[ATTR_BRIGHTNESS] = brightness
 
+        # Override mode always uses color_temp (not RGB), sleep mode may use either
         sleep_rgb = (
-            self.sleep_mode_switch.is_on
+            not is_override
+            and self.sleep_mode_switch.is_on
             and self._sun_light_settings.sleep_rgb_or_color_temp == "rgb_color"
         )
         if (
@@ -1249,7 +1347,7 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
             and adapt_color
             and not (prefer_rgb_color and "color" in features)
             and not (sleep_rgb and "color" in features)
-            and not (self._settings["force_rgb_color"] and "color" in features)
+            and not (self._settings.get("force_rgb_color") and "color" in features)
         ):
             _LOGGER.debug("%s: Setting color_temp of light %s", self._name, light)
             state = self.hass.states.get(light)
@@ -1604,6 +1702,46 @@ class AdaptiveSwitch(SwitchEntity, RestoreEntity):
         await self._update_attrs_and_maybe_adapt_lights(
             context=self.create_context("sleep", parent=event.context),
             transition=self._sleep_transition,
+            force=True,
+        )
+
+    async def _override_mode_switch_state_event_action(self, event: Event) -> None:
+        """Handle override mode switch state changes."""
+        if not _is_state_event(event, (STATE_ON, STATE_OFF)):
+            _LOGGER.debug("%s: Ignoring override event %s", self._name, event)
+            return
+        _LOGGER.debug(
+            "%s: _override_mode_switch_state_event_action, event: '%s'",
+            self._name,
+            event,
+        )
+        # Reset the manually controlled status when the "override mode" changes
+        self.manager.reset(*self.lights)
+        await self._update_attrs_and_maybe_adapt_lights(
+            context=self.create_context("override", parent=event.context),
+            transition=self._override_transition,
+            force=True,
+        )
+
+    async def _override_value_state_event_action(self, event: Event) -> None:
+        """Handle override brightness/color temp value changes."""
+        # Only re-adapt if override mode is currently on
+        if not self.override_mode_switch.is_on:
+            _LOGGER.debug(
+                "%s: Ignoring override value change event because override mode is off: %s",
+                self._name,
+                event,
+            )
+            return
+        _LOGGER.debug(
+            "%s: _override_value_state_event_action, event: '%s'",
+            self._name,
+            event,
+        )
+        # Re-adapt all lights with new override values
+        await self._update_attrs_and_maybe_adapt_lights(
+            context=self.create_context("override_value", parent=event.context),
+            transition=self._override_transition,
             force=True,
         )
 

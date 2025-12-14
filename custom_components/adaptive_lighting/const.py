@@ -13,6 +13,7 @@ ICON_MAIN = "mdi:theme-light-dark"
 ICON_BRIGHTNESS = "mdi:brightness-4"
 ICON_COLOR_TEMP = "mdi:sun-thermometer"
 ICON_SLEEP = "mdi:sleep"
+ICON_OVERRIDE = "mdi:lock-open-variant"
 
 DOMAIN = "adaptive_lighting"
 
@@ -255,8 +256,20 @@ DOCS[CONF_MULTI_LIGHT_INTERCEPT] = (
 SLEEP_MODE_SWITCH = "sleep_mode_switch"
 ADAPT_COLOR_SWITCH = "adapt_color_switch"
 ADAPT_BRIGHTNESS_SWITCH = "adapt_brightness_switch"
+OVERRIDE_MODE_SWITCH = "override_mode_switch"
+OVERRIDE_BRIGHTNESS_NUMBER = "override_brightness_number"
+OVERRIDE_COLOR_TEMP_NUMBER = "override_color_temp_number"
 ATTR_ADAPTIVE_LIGHTING_MANAGER = "manager"
 UNDO_UPDATE_LISTENER = "undo_update_listener"
+
+# Override mode defaults
+DEFAULT_OVERRIDE_BRIGHTNESS = 100
+DEFAULT_OVERRIDE_COLOR_TEMP = 4000
+CONF_OVERRIDE_TRANSITION = "override_transition"
+DEFAULT_OVERRIDE_TRANSITION = 1
+DOCS[CONF_OVERRIDE_TRANSITION] = (
+    'Duration of transition when "override mode" is toggled in seconds. 🔒'
+)
 NONE_STR = "None"
 ATTR_ADAPT_COLOR = "adapt_color"
 DOCS[ATTR_ADAPT_COLOR] = "Whether to adapt the color on supporting lights. 🌈"
@@ -328,6 +341,7 @@ VALIDATION_TUPLES: list[tuple[str, Any, Any]] = [
         selector.ColorRGBSelector(selector.ColorRGBSelectorConfig()),  # type: ignore[arg-type]
     ),
     (CONF_SLEEP_TRANSITION, DEFAULT_SLEEP_TRANSITION, VALID_TRANSITION),
+    (CONF_OVERRIDE_TRANSITION, DEFAULT_OVERRIDE_TRANSITION, VALID_TRANSITION),
     (CONF_ADAPT_UNTIL_SLEEP, DEFAULT_ADAPT_UNTIL_SLEEP, bool),
     (CONF_SUNRISE_TIME, NONE_STR, str),
     (CONF_MIN_SUNRISE_TIME, NONE_STR, str),
