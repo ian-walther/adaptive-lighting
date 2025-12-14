@@ -19,7 +19,7 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-PLATFORMS = ["switch"]
+PLATFORMS = ["number", "switch"]
 
 
 def _all_unique_names(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -81,9 +81,9 @@ async def async_update_options(hass: HomeAssistant, config_entry: ConfigEntry) -
 
 async def async_unload_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    unload_ok = await hass.config_entries.async_forward_entry_unload(
+    unload_ok = await hass.config_entries.async_unload_platforms(
         config_entry,
-        "switch",
+        PLATFORMS,
     )
     data = hass.data[DOMAIN]
     data[config_entry.entry_id][UNDO_UPDATE_LISTENER]()
